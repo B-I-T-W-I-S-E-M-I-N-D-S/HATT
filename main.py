@@ -17,12 +17,12 @@ from dataset import VideoDataSet
 from models import MYNET, SuppressNet
 from loss_func import cls_loss_func, cls_loss_func_, regress_loss_func
 from loss_func import MultiCrossEntropyLoss
-from functools import *
+from functools import partial
 
 def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     train_loader = torch.utils.data.DataLoader(train_dataset,
-                                                batch_size=opt['batch_size'], shuffle=True,
-                                                num_workers=0, pin_memory=True, drop_last=False)      
+                                               batch_size=opt['batch_size'], shuffle=True,
+                                               num_workers=0, pin_memory=True, drop_last=False)      
     epoch_cost = 0
     epoch_cost_cls = 0
     epoch_cost_reg = 0
@@ -129,7 +129,7 @@ def eval_one_epoch(opt, model, test_dataset):
 
 def train(opt): 
     writer = SummaryWriter()
-    model = MYNET(opt)
+    model = MYNET(opt, batch_first=True)  # Set batch_first=True for Transformer layers
     
     # Move model to GPU and wrap with DataParallel if multiple GPUs are available
     if torch.cuda.device_count() > 1:
@@ -137,9 +137,11 @@ def train(opt):
         model = nn.DataParallel(model)
     model = model.cuda()
     
+    # Access history_unit through module if DataParallel is used
+    history_unit_params = model.module.history_unit.parameters() if isinstance(model, nn.DataParallel) else model.history_unit.parameters()
     rest_of_model_params = [param for name, param in model.named_parameters() if "history_unit" not in name]
   
-    optimizer = optim.Adam([{'params': model.history_unit.parameters(), 'lr': 1e-6}, {'params': rest_of_model_params}], lr=opt["lr"], weight_decay=opt["weight_decay"])  
+    optimizer = optim.Adam([{'params': history_unit_params, 'lr': 1e-6}, {'params': rest_of_model_params}], lr=opt["lr"], weight_decay=opt["weight_decay"])  
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt["lr_step"])
     
     opt["split"] = "train"
@@ -472,7 +474,7 @@ def eval_map_supnet(opt, dataset, output_cls, output_reg, labels_cls, labels_reg
     return result_dict
 
 def test_frame(opt): 
-    model = MYNET(opt)
+    model = MYNET(opt, batch_first=True)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
     model = model.cuda()
@@ -531,7 +533,7 @@ class SaveOutput:
         self.outputs = []
 
 def test(opt): 
-    model = MYNET(opt)
+    model = MYNET(opt, batch_first=True)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
     model = model.cuda()
@@ -563,7 +565,7 @@ def test(opt):
     mAP = evaluation_detection(opt)
 
 def test_online(opt): 
-    model = MYNET(opt)
+    model = MYNET(opt, batch_first=True)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
     model = model.cuda()
