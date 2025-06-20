@@ -2,7 +2,6 @@ import os
 import json
 import torch
 import torchvision
-import torch.nn as nn
 import torch.nn.parallel
 import torch.nn.functional as F
 import torch.optim as optim
@@ -22,35 +21,27 @@ from functools import *
 
 def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     train_loader = torch.utils.data.DataLoader(train_dataset,
-                                               batch_size=opt['batch_size'], 
-                                               shuffle=True,
-                                               num_workers=min(os.cpu_count(), 8 * torch.cuda.device_count()),  # Scale workers with GPU count
-                                               pin_memory=True,
-                                               drop_last=False)      
+                                                batch_size=opt['batch_size'], shuffle=True,
+                                                num_workers=0, pin_memory=True,drop_last=False)      
     epoch_cost = 0
     epoch_cost_cls = 0
     epoch_cost_reg = 0
     epoch_cost_snip = 0
     
     total_iter = len(train_dataset)//opt['batch_size']
-    cls_loss = MultiCrossEntropyLoss(num_classes=opt['num_of_class'], focal=True)
-    snip_loss = MultiCrossEntropyLoss(num_classes=opt['num_of_class'], focal=True)
+    cls_loss = MultiCrossEntropyLoss(num_classes=opt['num_of_class'],focal=True)
+    snip_loss = MultiCrossEntropyLoss(num_classes=opt['num_of_class'],focal=True)
     
     valid_batches = 0  # Track valid batches to avoid division by zero
     
-    for n_iter, (input_data, cls_label, reg_label, snip_label) in enumerate(tqdm(train_loader)):
+    for n_iter,(input_data,cls_label,reg_label,snip_label) in enumerate(tqdm(train_loader)):
+
         if warmup and total_iter > 0:
             for g in optimizer.param_groups:
                 g['lr'] = n_iter * (opt['lr']) / total_iter
         
         try:
-            # Move data to GPU
-            input_data = input_data.cuda(non_blocking=True)
-            cls_label = cls_label.cuda(non_blocking=True)
-            reg_label = reg_label.cuda(non_blocking=True)
-            snip_label = snip_label.cuda(non_blocking=True)
-            
-            act_cls, act_reg, snip_cls = model(input_data)
+            act_cls, act_reg, snip_cls = model(input_data.cuda())
 
             # Check for NaN values in model outputs
             if torch.isnan(act_cls).any() or torch.isnan(act_reg).any() or torch.isnan(snip_cls).any():
@@ -132,26 +123,20 @@ def eval_one_epoch(opt, model, test_dataset):
 
     return cls_loss, reg_loss, tot_loss, IoUmAP_5
 
+    
 def train(opt): 
     writer = SummaryWriter()
-    model = MYNET(opt)
-    
-    # Wrap model with DataParallel if multiple GPUs are available
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model)
-    model = model.cuda()
+    model = MYNET(opt).cuda()
     
     rest_of_model_params = [param for name, param in model.named_parameters() if "history_unit" not in name]
   
-    optimizer = optim.Adam([{'params': model.module.history_unit.parameters() if isinstance(model, nn.DataParallel) else model.history_unit.parameters(), 'lr': 1e-6}, 
-                           {'params': rest_of_model_params}], lr=opt["lr"], weight_decay=opt["weight_decay"])  
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt["lr_step"])
+    optimizer = optim.Adam([{'params': model.history_unit.parameters(), 'lr': 1e-6}, {'params': rest_of_model_params}],lr=opt["lr"],weight_decay = opt["weight_decay"])  
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,step_size = opt["lr_step"])
     
     opt["split"] = "train"
 
-    train_dataset = VideoDataSet(opt, subset="train")      
-    test_dataset = VideoDataSet(opt, subset=opt['inference_subset'])
+    train_dataset = VideoDataSet(opt,subset="train")      
+    test_dataset = VideoDataSet(opt,subset=opt['inference_subset'])
     
     warmup = False
     
@@ -182,10 +167,9 @@ def train(opt):
         writer.add_scalars('data/mAP', {'test': IoUmAP_5}, n_epoch)
         print("testing loss(epoch %d): %.06f, cls - %.06f, reg - %.06f, mAP Avg - %.06f"%(n_epoch, tot_loss, cls_loss, reg_loss, IoUmAP_5))
                     
-        # Save state dict from DataParallel's module
         state = {'epoch': n_epoch + 1,
-                 'state_dict': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()}
-        torch.save(state, opt["checkpoint_path"]+"/"+opt["exp"]+"_checkpoint_"+str(n_epoch+1)+".pth.tar")
+                    'state_dict': model.state_dict()}
+        torch.save(state, opt["checkpoint_path"]+"/"+opt["exp"]+"_checkpoint_"+str(n_epoch+1)+".pth.tar" )
         
         # Initialize best_map if it doesn't exist
         if not hasattr(model, 'best_map'):
@@ -193,7 +177,7 @@ def train(opt):
             
         if IoUmAP_5 > model.best_map:
             model.best_map = IoUmAP_5
-            torch.save(state, opt["checkpoint_path"]+"/"+opt["exp"]+"_ckp_best.pth.tar")
+            torch.save(state, opt["checkpoint_path"]+"/"+opt["exp"]+"_ckp_best.pth.tar" )
             
         model.train()
                 
@@ -202,11 +186,8 @@ def train(opt):
 
 def eval_frame(opt, model, dataset):
     test_loader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=opt['batch_size'], 
-                                             shuffle=False,
-                                             num_workers=min(os.cpu_count(), 8 * torch.cuda.device_count()),  # Scale workers with GPU count
-                                             pin_memory=True,
-                                             drop_last=False)
+                                                batch_size=opt['batch_size'], shuffle=False,
+                                                num_workers=0, pin_memory=True,drop_last=False)
     
     labels_cls = {}
     labels_reg = {}
@@ -225,14 +206,9 @@ def eval_frame(opt, model, dataset):
     epoch_cost_reg = 0.0
     valid_batches = 0
     
-    for n_iter, (input_data, cls_label, reg_label, _) in enumerate(tqdm(test_loader)):
+    for n_iter,(input_data,cls_label,reg_label, _) in enumerate(tqdm(test_loader)):
         try:
-            # Move data to GPU
-            input_data = input_data.cuda(non_blocking=True)
-            cls_label = cls_label.cuda(non_blocking=True)
-            reg_label = reg_label.cuda(non_blocking=True)
-            
-            act_cls, act_reg, _ = model(input_data)
+            act_cls, act_reg, _ = model(input_data.cuda())
             
             # Check for NaN values
             if torch.isnan(act_cls).any() or torch.isnan(act_reg).any():
@@ -301,6 +277,7 @@ def eval_frame(opt, model, dataset):
      
     return cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames
 
+
 def eval_map_nms(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
     result_dict = {}
     proposal_dict = []
@@ -310,6 +287,7 @@ def eval_map_nms(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
     threshold = opt['threshold']
     anchors = opt['anchors']
     
+    # Debug print to check label_name length
     print(f"Number of classes: {num_class}, Label name length: {len(dataset.label_name)}")
     print(f"Label names: {dataset.label_name}")
                                              
@@ -328,13 +306,18 @@ def eval_map_nms(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
             
             proposal_anc_dict = []
             for anc_idx in range(0, len(anchors)):
+                # Ensure we have valid data
                 if anc_idx >= len(cls_anc) or anc_idx >= len(reg_anc):
                     continue
                     
+                # Handle potential NaN values
                 if np.isnan(cls_anc[anc_idx]).any() or np.isnan(reg_anc[anc_idx]).any():
                     continue
                 
+                # Make sure we don't go beyond the available classes
                 max_class_idx = min(len(cls_anc[anc_idx]), len(dataset.label_name))
+                
+                # Use np.where instead of np.argwhere for better NaN handling
                 valid_mask = ~np.isnan(cls_anc[anc_idx][:max_class_idx])
                 threshold_mask = cls_anc[anc_idx][:max_class_idx] > threshold
                 cls_indices = np.where(valid_mask & threshold_mask)[0]
@@ -342,14 +325,16 @@ def eval_map_nms(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
                 if len(cls_indices) == 0:
                     continue
                 
+                # Handle potential NaN in regression outputs
                 if np.isnan(reg_anc[anc_idx]).any():
                     continue
                     
                 ed = idx + anchors[anc_idx] * reg_anc[anc_idx][0]
-                length = anchors[anc_idx] * np.exp(np.clip(reg_anc[anc_idx][1], -10, 10))
+                length = anchors[anc_idx] * np.exp(np.clip(reg_anc[anc_idx][1], -10, 10))  # Clip to prevent overflow
                 st = ed - length
                 
                 for label in cls_indices:
+                    # Additional safety check
                     if label >= len(dataset.label_name):
                         print(f"Warning: Label index {label} is out of range. Max valid index is {len(dataset.label_name)-1}")
                         continue
@@ -374,18 +359,12 @@ def eval_map_nms(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
         
     return result_dict
 
+
 def eval_map_supnet(opt, dataset, output_cls, output_reg, labels_cls, labels_reg):
-    model = SuppressNet(opt)
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-    model = model.cuda()
-    
+    model = SuppressNet(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best_suppress.pth.tar")
     base_dict = checkpoint['state_dict']
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(base_dict)
-    else:
-        model.load_state_dict(base_dict)
+    model.load_state_dict(base_dict)
     model.eval()
     
     result_dict = {}
@@ -458,8 +437,8 @@ def eval_map_supnet(opt, dataset, output_cls, output_reg, labels_cls, labels_reg
                     if cls_idx < conf_queue.shape[1]:
                         conf_queue[-1, cls_idx] = proposal["score"]
             
-            minput = conf_queue.unsqueeze(0).cuda(non_blocking=True)
-            suppress_conf = model(minput)
+            minput = conf_queue.unsqueeze(0)
+            suppress_conf = model(minput.cuda())
             suppress_conf = suppress_conf.squeeze(0).detach().cpu().numpy()
             
             for cls in range(0, min(num_class-1, len(suppress_conf))):
@@ -474,21 +453,15 @@ def eval_map_supnet(opt, dataset, output_cls, output_reg, labels_cls, labels_reg
         
     return result_dict
 
+ 
 def test_frame(opt): 
-    model = MYNET(opt)
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-    model = model.cuda()
-    
+    model = MYNET(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best.pth.tar")
     base_dict = checkpoint['state_dict']
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(base_dict)
-    else:
-        model.load_state_dict(base_dict)
+    model.load_state_dict(base_dict)
     model.eval()
     
-    dataset = VideoDataSet(opt, subset=opt['inference_subset'])    
+    dataset = VideoDataSet(opt,subset=opt['inference_subset'])    
     outfile = h5py.File(opt['frame_result_file'].format(opt['exp']), 'w')
     
     cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames = eval_frame(opt, model, dataset)
@@ -520,9 +493,11 @@ def patch_attention(m):
     def wrap(*args, **kwargs):
         kwargs["need_weights"] = True
         kwargs["average_attn_weights"] = False
+
         return forward_orig(*args, **kwargs)
 
     m.forward = wrap
+
 
 class SaveOutput:
     def __init__(self):
@@ -535,21 +510,14 @@ class SaveOutput:
         self.outputs = []
 
 def test(opt): 
-    model = MYNET(opt)
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-    model = model.cuda()
-    
+    model = MYNET(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/"+opt['exp']+"_ckp_best.pth.tar")
     base_dict = checkpoint['state_dict']
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(base_dict)
-    else:
-        model.load_state_dict(base_dict)
+    model.load_state_dict(base_dict)
     model.eval()
     
     opt["split"] = "test"
-    dataset = VideoDataSet(opt, subset=opt['inference_subset'])
+    dataset = VideoDataSet(opt,subset=opt['inference_subset'])
     
     cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames = eval_frame(opt, model, dataset)
     
@@ -567,40 +535,24 @@ def test(opt):
     
     mAP = evaluation_detection(opt)
 
+
 def test_online(opt): 
-    model = MYNET(opt)
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-    model = model.cuda()
-    
-    sup_model = SuppressNet(opt)
-    if torch.cuda.device_count() > 1:
-        sup_model = nn.DataParallel(sup_model)
-    sup_model = sup_model.cuda()
-    
+    model = MYNET(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best.pth.tar")
     base_dict = checkpoint['state_dict']
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(base_dict)
-    else:
-        model.load_state_dict(base_dict)
+    model.load_state_dict(base_dict)
     model.eval()
     
+    sup_model = SuppressNet(opt).cuda()
     checkpoint = torch.load(opt["checkpoint_path"]+"/ckp_best_suppress.pth.tar")
     base_dict = checkpoint['state_dict']
-    if isinstance(sup_model, nn.DataParallel):
-        sup_model.module.load_state_dict(base_dict)
-    else:
-        sup_model.load_state_dict(base_dict)
+    sup_model.load_state_dict(base_dict)
     sup_model.eval()
     
-    dataset = VideoDataSet(opt, subset=opt['inference_subset'])
+    dataset = VideoDataSet(opt,subset=opt['inference_subset'])
     test_loader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=1, 
-                                             shuffle=False,
-                                             num_workers=min(os.cpu_count(), 8 * torch.cuda.device_count()),  # Scale workers with GPU count
-                                             pin_memory=True,
-                                             drop_last=False)
+                                                batch_size=1, shuffle=False,
+                                                num_workers=0, pin_memory=True,drop_last=False)
     
     result_dict = {}
     proposal_dict = []
@@ -626,8 +578,8 @@ def test_online(opt):
             input_queue[:-1,:] = input_queue[1:,:].clone()
             input_queue[-1:,:] = dataset._get_base_data(video_name, idx, idx+1)
             
-            minput = input_queue.unsqueeze(0).cuda(non_blocking=True)
-            act_cls, act_reg, _ = model(minput)
+            minput = input_queue.unsqueeze(0)
+            act_cls, act_reg, _ = model(minput.cuda())
             act_cls = torch.softmax(act_cls, dim=-1)
             
             cls_anc = act_cls.squeeze(0).detach().cpu().numpy()
@@ -666,9 +618,9 @@ def test_online(opt):
                         
                     tmp_dict = {}
                     tmp_dict["segment"] = [float(st*frame_to_time/100.0), float(ed*frame_to_time/100.0)]
-                    tmp_dict["score"] = float(cls_anc[anc_idx][label])
-                    tmp_dict["label"] = dataset.label_name[label]
-                    tmp_dict["gentime"] = float(idx*frame_to_time/100.0)
+                    tmp_dict["score"]= float(cls_anc[anc_idx][label])
+                    tmp_dict["label"]=dataset.label_name[label]
+                    tmp_dict["gentime"]= float(idx*frame_to_time/100.0)
                     proposal_anc_dict.append(tmp_dict)
                           
             proposal_anc_dict = non_max_suppression(proposal_anc_dict, overlapThresh=opt['soft_nms'])  
@@ -679,11 +631,11 @@ def test_online(opt):
                 cls_idx = dataset.label_name.index(proposal['label'])
                 sup_queue[-1,cls_idx]=proposal["score"]
             
-            minput = sup_queue.unsqueeze(0).cuda(non_blocking=True)
-            suppress_conf = sup_model(minput)
-            suppress_conf = suppress_conf.squeeze(0).detach().cpu().numpy()
+            minput = sup_queue.unsqueeze(0)
+            suppress_conf = sup_model(minput.cuda())
+            suppress_conf=suppress_conf.squeeze(0).detach().cpu().numpy()
             
-            for cls in range(0, num_class-1):
+            for cls in range(0,num_class-1):
                 if suppress_conf[cls] > opt['sup_threshold']:
                     for proposal in proposal_anc_dict:
                         if proposal['label'] == dataset.label_name[cls]:
@@ -703,6 +655,7 @@ def test_online(opt):
     outfile.close()
     
     evaluation_detection(opt)
+
 
 def main(opt):
     max_perf=0
@@ -724,19 +677,16 @@ if __name__ == '__main__':
     opt = vars(opt)
     if not os.path.exists(opt["checkpoint_path"]):
         os.makedirs(opt["checkpoint_path"]) 
-    opt_file = open(opt["checkpoint_path"]+"/"+opt["exp"]+"_opts.json","w")
-    json.dump(opt, opt_file)
+    opt_file=open(opt["checkpoint_path"]+"/"+opt["exp"]+"_opts.json","w")
+    json.dump(opt,opt_file)
     opt_file.close()
     
     if opt['seed'] >= 0:
         seed = opt['seed'] 
         torch.manual_seed(seed)
         np.random.seed(seed)
+        #random.seed(seed)
            
     opt['anchors'] = [int(item) for item in opt['anchors'].split(',')]  
            
-    # Ensure CUDA is available
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. Please check your GPU setup.")
-    
     main(opt)
